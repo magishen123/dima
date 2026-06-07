@@ -15,7 +15,7 @@ git clone https://gitflic.ru/project/conty111/demoexam
        - интерфейс в BR-RTR 172.16.2.1/28
 
        HQ-RTR:
-
+       ip firewall disabled
        - интерфейс в ISP 172.16.1.2/28
        - интерфейс в HQ-SRV 192.168.100.1/27 
        - интерфейс в HQ-CLI 192.168.200.1/28
