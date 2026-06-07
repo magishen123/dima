@@ -1,0 +1,26 @@
+---
+authors:
+- Eltex
+- Sergey Marinkevich <sergey.marinkevich@eltex.loc>
+- Klabukov Viacheslav <viacheslav.klabukov@eltex.loc>
+- Anton Reschikov <anton.reschikov@eltex.loc>
+- Aleksandr Brodin <aleksandr.brodin@eltex-co.ru>
+dependencies: {
+  "ansible.netcommon": ">=7.1.0"
+}
+name: esr
+namespace: eltex
+version: 2.1.0
+readme: README.md
+description: Ansible Network Collection for Eltex ESR routers
+license_file: LICENCE
+tags: [eltex, networking, esr]
+repository: https://gitlab.eltex.loc/ansible/eltex.esr
+homepage: https://eltex-co.ru/
+issues: https://gitlab.eltex.loc/ansible/eltex.esr/-/issues
+build_ignore:
+  - tests
+  - .gitignore
+  - .idea
+  - .pytest_cache
+  - venv

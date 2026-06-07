@@ -1,0 +1,11 @@
+- name: get backup
+  tags: get backup
+  hosts: all
+  connection: network_cli
+  collections: eltex.esr
+  vars:
+    ansible_network_os: eltex.esr.esr
+  gather_facts: False
+  tasks:
+    - name: get backup
+      include_tasks: base_tasks/get_backup_task.yml

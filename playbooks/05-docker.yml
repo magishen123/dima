@@ -1,0 +1,435 @@
+---
+# ══════════════════════════════════════════════════════════════
+#  docker.yml — Все Docker-based сервисы
+#
+#  BR-SRV: Nextcloud (MySQL + Nextcloud) + системный Nginx с SSL
+#  BR-SRV: Testapp (Site + MariaDB)
+#
+#  HQ-CLI: Пользователи, группы, каталоги (Модуль 2 вариативной части)
+#
+# ══════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════
+#  BR-SRV: Nextcloud (Модуль 3 вариативной части)
+#  Задание: развернуть Nextcloud на BR-SRV
+#  - docker-compose с 2 сервисами: MySQL + Nextcloud
+#  - системный Nginx с SSL, proxy_pass на порт 8080
+#  - HSTS, X-Real-IP, X-Forwarded-Proto
+#  - symlink в /etc/nginx/sites-enabled/
+# ════════════════════════════════════════
+- name: "docker · BR-SRV — Nextcloud"
+  hosts: br-srv
+  become: true
+  tags: [docker, br-srv, nextcloud]
+  tasks:
+
+    # ══════════ Docker installation ══════════
+    - name: Enable and start Docker
+      tags: [docker, nextcloud]
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    # ══════════ Nextcloud (Модуль 3 вариативной части) ══════════
+
+    - name: Copy docker files from CD/DVD to /home/user
+      tags: [testapp]
+      ansible.builtin.copy:
+        src: /mnt/cdrom/docker/
+        dest: /home/user/docker/
+        remote_src: true
+        mode: preserve
+    
+    - name: Load Docker images
+      tags: [testapp, additional, nextcloud]
+      ansible.builtin.shell: |
+        set -e
+        docker load < /home/user/docker/site_latest.tar
+        docker load < /home/user/docker/mariadb_latest.tar
+        docker load < /root/nextcloud_latest.tar
+      changed_when: true
+
+    - name: Create Nextcloud working directory
+      tags: [nextcloud]
+      ansible.builtin.file:
+        path: "{{ nextcloud_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Create Nextcloud volume directories
+      tags: [nextcloud]
+      ansible.builtin.file:
+        path: "{{ nextcloud_dir }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - db_data
+        - nextcloud_data
+
+    - name: Write docker-compose.yml (MySQL + Nextcloud — 2 сервиса)
+      tags: [nextcloud]
+      ansible.builtin.copy:
+        dest: "{{ nextcloud_dir }}/docker-compose.yml"
+        content: |
+          version: '3.8'
+
+          services:
+            db:
+              image: mariadb:10.11
+              container_name: nextcloud-db
+              restart: always
+              command: --transaction-isolation=READ-COMMITTED --log-bin=binlog --binlog-format=ROW
+              volumes:
+                - {{ nextcloud_dir }}/db_data:/var/lib/mysql
+              environment:
+                MARIADB_ROOT_PASSWORD: {{ nextcloud_db_pass }}
+                MARIADB_DATABASE: {{ nextcloud_db_name }}
+                MARIADB_USER: {{ nextcloud_db_user }}
+                MARIADB_PASSWORD: {{ nextcloud_db_pass }}
+              networks:
+                - nextcloud
+
+            nextcloud:
+              image: nextcloud:latest
+              container_name: nextcloud-app
+              restart: always
+              depends_on:
+                - db
+              ports:
+                - "{{ nextcloud_port }}:80"
+              volumes:
+                - {{ nextcloud_dir }}/nextcloud_data:/var/www/html
+              environment:
+                MYSQL_HOST: db
+                MYSQL_DATABASE: {{ nextcloud_db_name }}
+                MYSQL_USER: {{ nextcloud_db_user }}
+                MYSQL_PASSWORD: {{ nextcloud_db_pass }}
+                NEXTCLOUD_ADMIN_USER: {{ nextcloud_admin_user }}
+                NEXTCLOUD_ADMIN_PASSWORD: {{ nextcloud_admin_pass }}
+                NEXTCLOUD_TRUSTED_DOMAINS: "*"
+                OVERWRITEPROTOCOL: https
+              networks:
+                - nextcloud
+
+          networks:
+            nextcloud:
+              driver: bridge
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Stop and remove old Nextcloud containers (if any)
+      tags: [nextcloud]
+      ansible.builtin.shell: |
+        cd {{ nextcloud_dir }} && docker-compose down --remove-orphans 2>/dev/null || true
+      changed_when: true
+
+    - name: Start Nextcloud stack
+      tags: [nextcloud]
+      ansible.builtin.shell: |
+        cd {{ nextcloud_dir }} && docker-compose up -d
+      changed_when: true
+
+    - name: Wait for Nextcloud container to be ready on port {{ nextcloud_port }}
+      tags: [nextcloud]
+      ansible.builtin.wait_for:
+        port: "{{ nextcloud_port }}"
+        delay: 10
+        timeout: 120
+
+    # ══════════ Системный Nginx + SSL (Модуль 3, п.2-4) ══════════
+
+    - name: Generate self-signed SSL certificate for Nextcloud
+      tags: [nextcloud, nginx]
+      ansible.builtin.shell: |
+        mkdir -p /etc/nginx/ssl
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /etc/nginx/ssl/nextcloud.key \
+          -out /etc/nginx/ssl/nextcloud.crt \
+          -subj "/C=RU/ST=Moscow/L=Moscow/O=Sirius/OU=IT/CN={{ nextcloud_domain }}"
+      args:
+        creates: /etc/nginx/ssl/nextcloud.crt
+      changed_when: true
+
+    - name: Create sites-available and sites-enabled directories
+      tags: [nextcloud, nginx]
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /etc/nginx/sites-available
+        - /etc/nginx/sites-enabled
+
+    - name: Write Nginx config for Nextcloud (proxy_pass + HSTS + X-Real-IP + X-Forwarded-Proto)
+      tags: [nextcloud, nginx]
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/nextcloud.conf
+        content: |
+          server {
+              listen 443 ssl http2;
+              server_name {{ nextcloud_domain }};
+
+              ssl_certificate /etc/nginx/ssl/nextcloud.crt;
+              ssl_certificate_key /etc/nginx/ssl/nextcloud.key;
+
+              client_max_body_size 512M;
+
+              # HSTS header (required by task)
+              add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+              location / {
+                  proxy_pass http://127.0.0.1:{{ nextcloud_port }};
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_buffering off;
+                  proxy_request_buffering off;
+              }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create symlink in /etc/nginx/sites-enabled/
+      tags: [nextcloud, nginx]
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/nextcloud.conf
+        dest: /etc/nginx/sites-enabled/nextcloud.conf
+        state: link
+
+    - name: Ensure nginx.conf includes sites-enabled
+      tags: [nextcloud, nginx]
+      ansible.builtin.lineinfile:
+        path: /etc/nginx/nginx.conf
+        line: "    include /etc/nginx/sites-enabled/*.conf;"
+        insertafter: "include /etc/nginx/conf.d"
+        state: present
+
+    - name: Remove default nginx server block if exists
+      tags: [nextcloud, nginx]
+      ansible.builtin.file:
+        path: /etc/nginx/conf.d/default.conf
+        state: absent
+
+    - name: Test Nginx configuration
+      tags: [nextcloud, nginx]
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Enable and restart Nginx
+      tags: [nextcloud, nginx]
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: restarted
+
+    - name: Wait for Nginx HTTPS to be ready
+      tags: [nextcloud, nginx]
+      ansible.builtin.wait_for:
+        port: 443
+        delay: 5
+        timeout: 30
+
+    - name: Show Nextcloud container status
+      tags: [nextcloud]
+      ansible.builtin.shell: |
+        docker ps --format '{{ '{{' }}.Names{{ '}}' }}: {{ '{{' }}.Status{{ '}}' }}'
+      changed_when: false
+      register: docker_status
+
+    - name: Display container status
+      tags: [nextcloud]
+      ansible.builtin.debug:
+        var: docker_status.stdout_lines
+
+    - name: Verify HTTPS access to Nextcloud
+      tags: [nextcloud, verify]
+      ansible.builtin.shell: |
+        curl -kI https://127.0.0.1 2>&1 | head -20
+      changed_when: false
+      register: nextcloud_verify
+
+    - name: Display HTTPS verification result
+      tags: [nextcloud, verify]
+      ansible.builtin.debug:
+        var: nextcloud_verify.stdout_lines
+
+# ════════════════════════════════════════
+#  BR-SRV: Testapp (Модуль 2, п.5)
+# ════════════════════════════════════════
+- name: "docker · BR-SRV — Testapp"
+  hosts: br-srv
+  become: true
+  tags: [docker, br-srv, testapp]
+  tasks:
+
+    - name: Write docker-compose file for testapp
+      tags: [testapp]
+      ansible.builtin.copy:
+        dest: /root/web.yaml
+        content: |
+          version: '3.8'
+
+          services:
+            db:
+              image: mariadb:10.11
+              container_name: db
+              restart: always
+              environment:
+                MARIADB_ROOT_PASSWORD: {{ testapp_db_pass }}
+                DB_NAME: {{ testapp_db_name }}
+                DB_USER: {{ testapp_db_user }}
+                DB_PASSW: {{ testapp_db_pass }}
+              volumes:
+                - db_data:/var/lib/mysql
+              networks:
+                - testapp
+
+            testapp:
+              image: site:latest
+              container_name: testapp
+              restart: always
+              ports:
+                - "{{ testapp_port }}:8000"
+              depends_on:
+                - db
+              environment:
+                DB_HOST: db
+                DB_NAME: {{ testapp_db_name }}
+                DB_USER: {{ testapp_db_user }}
+                DB_PASS: {{ testapp_db_pass }}
+                DB_TYPE: maria
+              networks:
+                - testapp
+
+          volumes:
+            db_data:
+
+          networks:
+            testapp:
+              driver: bridge
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Start testapp containers
+      tags: [testapp]
+      ansible.builtin.shell: |
+        cd /root && docker-compose -f web.yaml up -d
+      changed_when: true
+
+    - name: Wait for MariaDB container to be ready
+      tags: [testapp]
+      ansible.builtin.shell: |
+        for i in $(seq 1 30); do
+          docker exec db mysql -u root -p{{ testapp_db_pass }} -e "SELECT 1" > /dev/null 2>&1 && exit 0
+          sleep 2
+        done
+        echo "MariaDB did not become ready in 60 seconds" >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Initialize testdb database
+      tags: [testapp]
+      ansible.builtin.shell: |
+        docker exec db mysql -u root -p{{ testapp_db_pass }} -e "
+          CREATE DATABASE IF NOT EXISTS {{ testapp_db_name }};
+          CREATE USER IF NOT EXISTS '{{ testapp_db_user }}'@'%' IDENTIFIED BY '{{ testapp_db_pass }}';
+          GRANT ALL PRIVILEGES ON {{ testapp_db_name }}.* TO '{{ testapp_db_user }}'@'%';
+          FLUSH PRIVILEGES;
+        "
+      changed_when: true
+
+    - name: Restart testapp containers
+      tags: [testapp]
+      ansible.builtin.shell: |
+        cd /root && docker-compose -f web.yaml restart
+      changed_when: true
+
+# ════════════════════════════════════════
+#  HQ-CLI: Пользователи, группы, каталоги
+#  (Модуль 2 вариативной части)
+# ════════════════════════════════════════
+- name: "docker · HQ-CLI — Users, groups, folders"
+  hosts: hq-cli
+  become: true
+  tags: [hq-cli, users]
+  tasks:
+
+    # ══════════ Модуль 2, п.1: Создать группы ══════════
+    - name: Create groups Work, Job, labor
+      tags: [users, groups]
+      ansible.builtin.group:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - Work
+        - Job
+        - labor
+
+    # ══════════ Модуль 2, п.2: Создать пользователей ══════════
+    - name: Create User1 and User2 in group Work
+      tags: [users]
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups: Work
+        append: true
+        state: present
+        create_home: true
+      loop:
+        - User1
+        - User2
+
+    - name: Create User3 and User4 in group Job
+      tags: [users]
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups: Job
+        append: true
+        state: present
+        create_home: true
+      loop:
+        - User3
+        - User4
+
+    - name: Create User5 in group labor
+      tags: [users]
+      ansible.builtin.user:
+        name: User5
+        groups: labor
+        append: true
+        state: present
+        create_home: true
+
+    # ══════════ Модуль 2, п.3-4: Создать каталоги ══════════
+    - name: Create /home/Folder directory
+      tags: [users, folders]
+      ansible.builtin.file:
+        path: /home/Folder
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: "Create /home/Folder/work_shared (770, root:Work)"
+      tags: [users, folders]
+      ansible.builtin.file:
+        path: /home/Folder/work_shared
+        state: directory
+        owner: root
+        group: Work
+        mode: "0770"
+
+    - name: "Create /home/Folder/job_readonly (750, root:Job)"
+      tags: [users, folders]
+      ansible.builtin.file:
+        path: /home/Folder/job_readonly
+        state: directory
+        owner: root
+        group: Job
+        mode: "0750"

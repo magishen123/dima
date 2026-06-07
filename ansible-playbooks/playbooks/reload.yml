@@ -1,0 +1,11 @@
+- name: reload
+  tags: reload
+  hosts: all
+  connection: network_cli
+  collections: eltex.esr
+  vars:
+    ansible_network_os: eltex.esr.esr
+  gather_facts: False
+  tasks:
+    - name: reload_system
+      include_tasks: base_tasks/reload_tasks.yml

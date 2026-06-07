@@ -1,0 +1,13 @@
+- name: change_config
+  tags: change_config
+  hosts: all
+  connection: network_cli
+  vars:
+    ansible_network_os: eltex.esr.esr
+  collections:
+    - eltex.esr
+  gather_facts: False
+  tasks:
+    - name: change configuration
+      tags: change configuration
+      include_tasks: base_tasks/change_config_task.yml

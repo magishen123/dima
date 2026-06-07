@@ -1,0 +1,441 @@
+---
+# ══════════════════════════════════════════════════════════════
+#  02-network.yml — Сетевая настройка всех маршрутизаторов
+#
+#  Задание 2:  IPv4 адресация на всех устройствах
+#  Задание 3a-b: ISP — адресация интерфейсов, NAT
+#  Задание 4:  Маршрутизация трафика на HQ-RTR
+#  Задание 6:  GRE туннель между HQ-RTR и BR-RTR
+#  Задание 7:  OSPF динамическая маршрутизация
+#  Задание 8:  NAT + DHCP на маршрутизаторах
+
+# ══════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════
+#  ISP — Linux router (RedOS)
+# ════════════════════════════════════════
+- name: "02-network · ISP router"
+  hosts: isp
+  become: true
+  tags: [isp]
+  tasks:
+
+    # ── Packages ──
+    # - name: Install network packages on ISP
+    #   tags: [packages]
+    #   ansible.builtin.dnf:
+    #     name:
+    #       - nftables
+    #       - bind-utils
+    #     state: present
+
+    # ── IP forwarding (Задание 3a) ──
+    - name: Enable IP forwarding (persistent)
+      tags: [forwarding]
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: true
+        state: present
+        reload: true
+
+    # ── nftables NAT (Задание 3b) ──
+    - name: Create nftables directory
+      tags: [nat]
+      ansible.builtin.file:
+        path: /etc/nftables
+        state: directory
+        mode: "0755"
+
+    - name: Write nftables NAT rules (masquerade for HQ-RTR and BR-RTR)
+      tags: [nat]
+      ansible.builtin.copy:
+        dest: /etc/nftables/isp.nft
+        content: |
+          table inet nat {
+                  chain POSTROUTING {
+                  type nat hook postrouting priority srcnat;
+                  oifname "{{ isp_wan_iface }}" masquerade
+                  }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Include nftables rules in main config
+      tags: [nat]
+      ansible.builtin.lineinfile:
+        path: /etc/sysconfig/nftables.conf
+        line: 'include "/etc/nftables/isp.nft"'
+        create: true
+        mode: "0644"
+
+    - name: Enable and start nftables
+      tags: [nat]
+      ansible.builtin.systemd:
+        name: nftables
+        enabled: true
+        state: restarted
+
+    # ── Static routes to internal networks (persistent via nmcli) ──
+    - name: Set persistent routes via HQ connection ({{ isp_hq_connection }})
+      tags: [routes]
+      ansible.builtin.shell: |
+        nmcli connection modify "{{ isp_hq_connection }}" \
+          ipv4.routes \
+            "{{ hq_srv_net }} {{ hq_rtr_uplink }}, {{ hq_cli_net }} {{ hq_rtr_uplink }}"
+      changed_when: true
+
+    - name: Set persistent routes via BR connection ({{ isp_br_connection }})
+      tags: [routes]
+      ansible.builtin.shell: |
+        nmcli connection modify "{{ isp_br_connection }}" \
+          ipv4.routes \
+            "{{ br_srv_net }} {{ br_rtr_uplink }}"
+      changed_when: true
+
+    - name: Reapply NM connections to activate routes
+      tags: [routes]
+      ansible.builtin.shell: |
+        nmcli connection up "{{ isp_hq_connection }}"
+        nmcli connection up "{{ isp_br_connection }}"
+      changed_when: true
+
+# ════════════════════════════════════════
+#  HQ-RTR — Eltex ESR
+# ════════════════════════════════════════
+- name: "02-network · HQ-RTR"
+  hosts: hq-rtr
+  gather_facts: false
+  tags: [eltex, hq-rtr]
+  tasks:
+
+    # ── Interfaces (Задание 2) — БЕЗ OSPF на uplink! ──
+    - name: "HQ-RTR · Interface {{ iface_uplink }} (uplink to ISP)"
+      tags: [interfaces]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "interface {{ iface_uplink }}"
+          - "ip firewall disable"
+          - "ip address {{ hq_rtr_uplink }}/28"
+
+    - name: "HQ-RTR · Interface {{ iface_srv }} (HQ-SRV network)"
+      tags: [interfaces]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "interface {{ iface_srv }}"
+          - "ip firewall disable"
+          - "ip address {{ hq_srv_gw }}/{{ hq_srv_mask }}"
+
+    - name: "HQ-RTR · Interface {{ iface_cli }} (HQ-CLI network)"
+      tags: [interfaces]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "interface {{ iface_cli }}"
+          - "ip firewall disable"
+          - "ip address {{ hq_cli_gw }}/{{ hq_cli_mask }}"
+
+    # ── OSPF (Задание 7) — ТОЛЬКО на GRE туннеле! ──
+    - name: "HQ-RTR · OSPF routing"
+      tags: [ospf]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "key-chain auth_ospf"
+          - "key 1"
+          - "key-string ascii-text {{ netadmin_password }}"
+          - "exit"
+          - "exit"
+          - "router ospf 1"
+          - "router-id 1.1.1.1"
+          - "area 0.0.0.0"
+          - "network {{ hq_srv_net }}"
+          - "network {{ hq_cli_net }}"
+          - "enable"
+          - "exit"
+          - "enable"
+
+    # ══════════ GRE Tunnel (Модуль 1, Задание 6) ══════════
+
+    - name: "HQ-RTR · GRE tunnel to BR-RTR"
+      tags: [gre, tunnel]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "tunnel gre 1"
+          - "ttl 64"
+          - "local address {{ hq_rtr_uplink }}"
+          - "remote address {{ br_rtr_uplink }}"
+          - "ip address {{ gre_hq_ip }}"
+          - "ip firewall disable"
+          - "ip ospf instance 1"
+          - "ip ospf authentication key-chain auth_ospf"
+          - "ip ospf authentication algorithm md5"
+          - "ip ospf"
+          - "enable"
+
+    # ── NAT source (Задание 8a) ──
+    - name: "HQ-RTR · NAT object-groups"
+      tags: [nat]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "object-group network LOCAL_NET"
+          - "ip address-range 192.168.100.2-192.168.100.30"
+          - "ip address-range 192.168.200.2-192.168.200.14"
+          - "exit"
+          - "object-group network PUBLIC_POOL"
+          - "ip address-range 172.16.1.3-172.16.1.7"
+
+    - name: "HQ-RTR · NAT source rules"
+      tags: [nat]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "interface {{ iface_uplink }}"
+          - "ip nat proxy-arp PUBLIC_POOL"
+          - "exit"
+          - "nat source"
+          - "pool TRANSLATE_ADDRESS"
+          - "ip address-range 172.16.1.3-172.16.1.7"
+          - "exit"
+          - "ruleset SNAT"
+          - "to interface {{ iface_uplink }}"
+          - "rule 1"
+          - "match source-address object-group network LOCAL_NET"
+          - "action source-nat pool TRANSLATE_ADDRESS"
+          - "enable"
+
+    # ── DHCP server for HQ-CLI (Задание 8b) ──
+    - name: "HQ-RTR · DHCP server"
+      tags: [dhcp]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "ip dhcp-server"
+          - "ip dhcp-server pool CLI_POOL"
+          - "network {{ hq_cli_net }}"
+          - "domain-name {{ domain }}"
+          - "address-range 192.168.200.2-192.168.200.14"
+          - "default-router {{ hq_cli_gw }}"
+          - "dns-server {{ hq_srv_ip }}"
+
+    # ── Static port forwarding / DNAT (Мод2-7) ──
+    - name: "HQ-RTR · DNAT — service object-groups"
+      tags: [dnat, portforward]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "object-group service HTTP_PORT"
+          - "port-range 8080"
+          - "exit"
+          - "object-group service SSH_PORT"
+          - "port-range 2026"
+
+    - name: "HQ-RTR · DNAT — port 8080 → HQ-SRV:80 + port 2026 → HQ-SRV:2026"
+      tags: [dnat, portforward]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "nat destination"
+          - "pool HQ_WEB_POOL"
+          - "ip address {{ hq_srv_ip }}"
+          - "ip port 80"
+          - "exit"
+          - "pool HQ_SSH_POOL"
+          - "ip address {{ hq_srv_ip }}"
+          - "ip port 2026"
+          - "exit"
+          - "ruleset DNAT"
+          - "from default"
+          - "rule 10"
+          - "match destination-address address-range {{ hq_rtr_uplink }}"
+          - "match protocol tcp"
+          - "match destination-port object-group HTTP_PORT"
+          - "action destination-nat pool HQ_WEB_POOL"
+          - "enable"
+          - "exit"
+          - "rule 20"
+          - "match destination-address address-range {{ hq_rtr_uplink }}"
+          - "match protocol tcp"
+          - "match destination-port object-group SSH_PORT"
+          - "action destination-nat pool HQ_SSH_POOL"
+          - "enable"
+
+    # ── Static routes — ТОЛЬКО default route! ──
+    - name: "HQ-RTR · Default route only (OSPF handles inter-office routing)"
+      tags: [routes]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "ip route 0.0.0.0/0 {{ isp_to_hq }} 200"
+
+# ════════════════════════════════════════
+#  BR-RTR — Eltex ESR
+# ════════════════════════════════════════
+- name: "02-network · BR-RTR (GRE tunnel)"
+  hosts: br-rtr
+  gather_facts: false
+  tags: [eltex, br-rtr]
+  tasks:
+
+    # ── Interfaces (Задание 2) — БЕЗ OSPF на uplink! ──
+    - name: "BR-RTR · Interface {{ iface_uplink }} (uplink to ISP)"
+      tags: [interfaces]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "interface {{ iface_uplink }}"
+          - "ip firewall disable"
+          - "ip address {{ br_rtr_uplink }}/28"
+
+    - name: "BR-RTR · Interface {{ iface_srv }} (BR-SRV network)"
+      tags: [interfaces]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "interface {{ iface_srv }}"
+          - "ip firewall disable"
+          - "ip address {{ br_srv_gw }}/{{ br_srv_mask }}"
+
+    # ── OSPF (Задание 7) — ТОЛЬКО на GRE туннеле! ──
+    - name: "BR-RTR · OSPF routing"
+      tags: [ospf]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "key-chain auth_ospf"
+          - "key 1"
+          - "key-string ascii-text {{ netadmin_password }}"
+          - "exit"
+          - "exit"
+          - "router ospf 1"
+          - "router-id 2.2.2.2"
+          - "area 0.0.0.0"
+          - "network {{ br_srv_net }}"
+          - "enable"
+          - "exit"
+          - "enable"
+    
+    # ══════════ GRE Tunnel (Модуль 1, Задание 6) ══════════
+
+    - name: "BR-RTR · GRE tunnel to HQ-RTR"
+      tags: [gre, tunnel]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "tunnel gre 1"
+          - "ttl 64"
+          - "local address {{ br_rtr_uplink }}"
+          - "remote address {{ hq_rtr_uplink }}"
+          - "ip address {{ gre_br_ip }}"
+          - "ip firewall disable"
+          - "ip ospf instance 1"
+          - "ip ospf authentication key-chain auth_ospf"
+          - "ip ospf authentication algorithm md5"
+          - "ip ospf"
+          - "enable"
+
+    # ── NAT source (Задание 8a) ──
+    - name: "BR-RTR · NAT object-groups"
+      tags: [nat]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "object-group network LOCAL_NET"
+          - "ip address-range 192.168.30.2-192.168.30.14"
+          - "exit"
+          - "object-group network PUBLIC_POOL"
+          - "ip address-range 172.16.2.3-172.16.2.7"
+
+    - name: "BR-RTR · NAT source rules"
+      tags: [nat]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "interface {{ iface_uplink }}"
+          - "ip nat proxy-arp PUBLIC_POOL"
+          - "exit"
+          - "nat source"
+          - "pool TRANSLATE_ADDRESS"
+          - "ip address-range 172.16.2.3-172.16.2.7"
+          - "exit"
+          - "ruleset SNAT"
+          - "to interface {{ iface_uplink }}"
+          - "rule 1"
+          - "match source-address object-group network LOCAL_NET"
+          - "action source-nat pool TRANSLATE_ADDRESS"
+          - "enable"
+
+    # ── Static port forwarding / DNAT (Мод2-7) ──
+    - name: "BR-RTR · DNAT — service object-groups"
+      tags: [dnat, portforward]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "object-group service HTTP_PORT"
+          - "port-range 8080"
+          - "exit"
+          - "object-group service SSH_PORT"
+          - "port-range 2026"
+
+    - name: "BR-RTR · DNAT — port 8080 → BR-SRV:8080 + port 2026 → BR-SRV:2026"
+      tags: [dnat, portforward]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "nat destination"
+          - "pool BR_WEB_POOL"
+          - "ip address {{ br_srv_ip }}"
+          - "ip port 8080"
+          - "exit"
+          - "pool BR_SSH_POOL"
+          - "ip address {{ br_srv_ip }}"
+          - "ip port 2026"
+          - "exit"
+          - "ruleset DNAT"
+          - "from default"
+          - "rule 10"
+          - "match destination-address address-range {{ br_rtr_uplink }}"
+          - "match protocol tcp"
+          - "match destination-port object-group HTTP_PORT"
+          - "action destination-nat pool BR_WEB_POOL"
+          - "enable"
+          - "exit"
+          - "rule 20"
+          - "match destination-address address-range {{ br_rtr_uplink }}"
+          - "match protocol tcp"
+          - "match destination-port object-group SSH_PORT"
+          - "action destination-nat pool BR_SSH_POOL"
+          - "enable"
+
+    # ── Static routes — ТОЛЬКО default route! ──
+    - name: "BR-RTR · Default route only (OSPF handles inter-office routing)"
+      tags: [routes]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "ip route 0.0.0.0/0 {{ isp_to_br }} 200"

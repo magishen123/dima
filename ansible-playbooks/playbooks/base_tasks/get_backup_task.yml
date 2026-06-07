@@ -1,0 +1,4 @@
+- name: get_backup
+  tags: get_backup
+  esr_config:
+    backup: yes

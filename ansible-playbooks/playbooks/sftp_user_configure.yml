@@ -1,0 +1,17 @@
+- name: sftp_user_configure
+  tags: sftp_user_configure
+  hosts: all
+  connection: network_cli
+  vars:
+    ansible_network_os: eltex.esr.esr
+    configuration:
+      - "username sftp_user"
+      - "ip sftp enable"
+      - "password password"
+  collections:
+    - eltex.esr
+  gather_facts: False
+  tasks:
+    - name: configure sftp user
+      tags: configure_sftp_user
+      include_tasks: base_tasks/change_config_task.yml

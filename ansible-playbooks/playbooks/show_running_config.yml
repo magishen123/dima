@@ -1,0 +1,13 @@
+- name: show_running_config
+  tags: show_running_config
+  hosts: all
+  connection: network_cli
+  vars:
+    ansible_network_os: eltex.esr.esr
+    esr_commands: show running-config
+  collections:
+    - eltex.esr
+  gather_facts: False
+  tasks:
+    - name: show running-config
+      include_tasks: base_tasks/commands_task.yml

@@ -1,0 +1,13 @@
+- name: input commands
+  tags: input commands
+  hosts: all
+  connection: network_cli
+  vars:
+    ansible_network_os: eltex.esr.esr
+  collections:
+    - eltex.esr
+  gather_facts: False
+  tasks:
+    - name: input commands on device
+      tags: input commands on device
+      include_tasks: base_tasks/commands_task.yml

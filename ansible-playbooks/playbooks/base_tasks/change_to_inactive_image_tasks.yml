@@ -1,0 +1,12 @@
+- name: show_bootvar_task
+  esr_command:
+    commands: show bootvar | include Not
+  register: result
+
+- name: set_inactive_image_task
+  esr_command:
+    commands:
+      - command: "boot system image-{{ result.stdout_lines[0] | regex_search( '\\d' | string) }}"
+        prompt: Continue?
+        answer: y
+    wait_for: result[0] contains successfully

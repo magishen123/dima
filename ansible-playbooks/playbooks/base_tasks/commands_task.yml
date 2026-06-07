@@ -1,0 +1,3 @@
+- name: show_task
+  esr_command:
+    commands: "{{ esr_commands | default('') | split('\\n') }}"

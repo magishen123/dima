@@ -1,0 +1,11 @@
+- name: reload system task
+  esr_command:
+    commands:
+      - command: reload system
+        prompt: "Do you really want to reload system now?"
+        answer: y
+
+- name: wait for target connection become reachable task
+  wait_for_connection:
+    delay: 60
+    sleep: 10

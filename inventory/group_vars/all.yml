@@ -1,0 +1,103 @@
+---
+# ══════════════════════════════════════════════
+#  Global variables — Demo Exam (sirius-exam.org)
+# ══════════════════════════════════════════════
+
+domain: sirius-exam.org
+dns_domain: sirius-exam.org
+dns_zone: sirius-exam.org
+timezone: Europe/Moscow
+
+# ── Network addressing ──
+# ISP links
+isp_wan_iface: enp7s1                # WAN interface (DHCP from provider)
+isp_hq_connection: ens19                 # ISP nmcli connection toward HQ-RTR (172.16.1.0/28)
+isp_br_connection: ens20                 # ISP nmcli connection toward BR-RTR (172.16.2.0/28)
+
+# ISP-facing addresses (172.16.x.0/28)
+isp_to_hq: 172.16.1.1
+isp_to_br: 172.16.2.1
+hq_rtr_uplink: 172.16.1.2
+br_rtr_uplink: 172.16.2.2
+
+# HQ-SRV network: ≤32 addresses → /27
+hq_srv_net: 192.168.100.0/27
+hq_srv_ip: 192.168.100.2
+hq_srv_mask: 27
+hq_srv_gw: 192.168.100.1
+hq_srv_dns: 192.168.100.2
+
+# HQ-CLI network: ≥16 addresses → /28
+hq_cli_net: 192.168.200.0/28
+hq_cli_mask: 28
+hq_cli_gw: 192.168.200.1
+# Branch network: ≤16 addresses → /28
+br_srv_net: 192.168.30.0/28
+br_srv_ip: 192.168.30.2
+br_srv_mask: 28
+br_srv_gw: 192.168.30.1
+br_srv_dns: 192.168.100.2
+
+# GRE tunnel
+gre_hq_ip: 10.10.10.1/30
+gre_br_ip: 10.10.10.2/30
+
+# NTP (ISP is the NTP server)
+ntp_server_ip: 172.16.1.1
+
+# ── Users ──
+sshuser_name: sshuser
+sshuser_uid: 2026
+sshuser_password: "P@ssw0rd"
+
+netadmin_name: net_admin
+netadmin_password: "P@ssw0rd"
+
+# ── SSH ──
+ssh_port: 2026
+ssh_max_auth_tries: 2
+ssh_banner_text: "Authorized access only"
+
+# ── DNS (BIND on HQ-SRV) ──
+dns_forwarders: "77.88.8.7"
+
+# ── RAID (HQ-SRV) ──
+raid_disk_size_mb: 1024
+
+# ── NFS ──
+nfs_export_path: /raid/nfs
+nfs_client_mount: /mnt/nfs
+nfs_allowed_net: "192.168.200.0/28"
+
+# ── Docker testapp (BR-SRV) ──
+testapp_db_name: testdb
+testapp_db_user: test
+testapp_db_pass: "P@ssw0rd"
+testapp_port: 8080
+
+# ── Web app Apache (HQ-SRV) ──
+webapp_db_name: webdb
+webapp_db_user: web
+webapp_db_pass: "P@ssw0rd"
+webapp_mariadb_root_pass: "P@ssw0rd"
+webapp_port: 8080
+
+# ── Samba (BR-SRV) ──
+samba_domain: sirius-exam.org
+
+# ── Nginx reverse proxy (ISP) ──
+nginx_htpasswd_user: WEB
+nginx_htpasswd_pass: "P@ssw0rd"
+
+# ── DHCP (HQ-RTR for HQ-CLI) ──
+dhcp_dns_suffix: sirius-exam.org
+
+# ── Nextcloud (BR-SRV, Модуль 3 вариативной части) ──
+nextcloud_dir: /opt/nextcloud
+nextcloud_domain: "127.0.0.1"
+nextcloud_port: 8081
+nextcloud_db_name: nextcloud
+nextcloud_db_user: nextcloud
+nextcloud_db_pass: "P@ssw0rd"
+nextcloud_admin_user: admin
+nextcloud_admin_pass: "P@ssw0rd"

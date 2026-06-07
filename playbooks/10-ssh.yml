@@ -1,0 +1,88 @@
+---
+# ══════════════════════════════════════════════════════════════
+#  03-ssh.yml — Безопасный удалённый доступ (SSH)
+#
+#  Задание 5: SSH на HQ-SRV и BR-SRV
+#    a. Порт 2026
+#    b. Только пользователь sshuser
+#    c. Максимум 2 попытки входа
+#    d. Баннер «Authorized access only»
+#
+# ══════════════════════════════════════════════════════════════
+
+- name: "03-ssh · SSH hardening on servers"
+  hosts: hq-srv,br-srv
+  become: true
+  tasks:
+
+    # ── Задание 3c: sshuser on HQ-SRV and BR-SRV ──
+    - name: Create sshuser account
+      tags: [users]
+      ansible.builtin.user:
+        name: "{{ sshuser_name }}"
+        uid: "{{ sshuser_uid }}"
+        groups: wheel
+        append: true
+        state: present
+
+    - name: Set sshuser password
+      tags: [users]
+      ansible.builtin.shell: |
+        set -eo pipefail
+        echo "{{ sshuser_name }}:{{ sshuser_password }}" | chpasswd
+      args:
+        executable: /bin/bash
+      changed_when: true
+      no_log: true
+    
+    - name: Allow sshuser passwordless sudo
+      tags: [users]
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/sshuser
+        content: "{{ sshuser_name }} ALL=(ALL) NOPASSWD: ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+
+    - name: Configure SSH port
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*Port\s'
+        line: "Port {{ ssh_port }}"
+
+    - name: Configure SSH MaxAuthTries
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*MaxAuthTries\s'
+        line: "MaxAuthTries {{ ssh_max_auth_tries }}"
+
+    - name: Configure SSH AllowUsers (only sshuser)
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*AllowUsers\s'
+        line: "AllowUsers {{ sshuser_name }}"
+
+    - name: Enable password authentication
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*PasswordAuthentication\s'
+        line: "PasswordAuthentication yes"
+
+    - name: Configure SSH banner path
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*Banner\s'
+        line: "Banner /etc/ssh/banner"
+
+    - name: Create SSH banner file
+      ansible.builtin.copy:
+        dest: /etc/ssh/banner
+        content: "{{ ssh_banner_text }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Restart sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted

@@ -1,0 +1,5 @@
+- name: change_config
+  esr_config:
+    apply_when: "{{ commit_config | default('modified') }}"
+    save_when: "{{ confirm_config | default('applied') }}"
+    lines: "{%if configuration is not string %}{{ configuration }}{% else %}{{ configuration | default('') | split('\\n')}}{% endif %}"

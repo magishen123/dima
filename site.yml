@@ -1,0 +1,13 @@
+---
+
+- import_playbook: playbooks/01-network.yml
+
+- import_playbook: playbooks/02-base.yml
+
+- import_playbook: playbooks/03-dns.yml
+
+- import_playbook: playbooks/04-services.yml
+
+- import_playbook: playbooks/05-docker.yml
+
+- import_playbook: playbooks/10-ssh.yml

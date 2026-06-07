@@ -1,0 +1,12 @@
+- name: copy
+  tags: copy
+  hosts: all
+  connection: network_cli
+  collections: eltex.esr
+  vars:
+    ansible_network_os: eltex.esr.esr
+    ansible_command_timeout: 120
+  gather_facts: False
+  tasks:
+    - name: test_copy
+      include_tasks: base_tasks/copy_task.yml

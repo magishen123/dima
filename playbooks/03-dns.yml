@@ -1,0 +1,279 @@
+---
+# ══════════════════════════════════════════════════════════════
+#  04-dns.yml — DNS-инфраструктура (BIND)
+#
+#  Задание 9: Инфраструктура разрешения доменных имён
+#    a. Основной DNS-сервер на HQ-SRV
+#    b. Прямая и обратная зоны
+#    c. DNS-пересылка на 77.88.8.7
+#
+# ══════════════════════════════════════════════════════════════
+
+- name: "04-dns · BIND DNS on HQ-SRV"
+  hosts: hq-srv
+  become: true
+  tasks:
+
+    # ── Packages ──
+    # - name: Install BIND packages
+    #   tags: [packages]
+    #   ansible.builtin.dnf:
+    #     name:
+    #       - bind
+    #       - bind-utils
+    #     state: present
+
+    # ── named.conf ──
+    - name: Write named.conf
+      tags: [config]
+      ansible.builtin.copy:
+        dest: /etc/named.conf
+        content: |
+          options {
+          	listen-on port 53 { any; };
+          	listen-on-v6 port 53 { none; };
+          	directory 	"/var/named";
+          	dump-file 	"/var/named/data/cache_dump.db";
+          	statistics-file "/var/named/data/named_stats.txt";
+          	memstatistics-file "/var/named/data/named_mem_stats.txt";
+          	secroots-file	"/var/named/data/named.secroots";
+          	recursing-file	"/var/named/data/named.recursing";
+          	allow-query     { any; };
+
+          	recursion yes;
+
+          	dnssec-validation no;
+          	forward first;
+
+          	forwarders { {{ dns_forwarders }}; };
+
+          	managed-keys-directory "/var/named/dynamic";
+
+          	pid-file "/run/named/named.pid";
+          	session-keyfile "/run/named/session.key";
+          };
+
+          logging {
+                  channel default_debug {
+                          file "data/named.run";
+                          severity dynamic;
+                  };
+          };
+
+          zone "." IN {
+          	type hint;
+          	file "named.ca";
+          };
+
+          zone "{{ dns_zone }}" {
+          	type master;
+          	file "master/{{ dns_zone }}";
+          };
+
+          zone "100.168.192.in-addr.arpa" {
+          	type master;
+          	file "master/100.168.192.in-addr.arpa";
+          };
+
+          zone "200.168.192.in-addr.arpa" {
+          	type master;
+          	file "master/200.168.192.in-addr.arpa";
+          };
+
+          zone "30.168.192.in-addr.arpa" {
+          	type master;
+          	file "master/30.168.192.in-addr.arpa";
+          };
+
+          zone "2.16.172.in-addr.arpa" {
+          	type master;
+          	file "master/2.16.172.in-addr.arpa";
+          };
+
+          zone "1.16.172.in-addr.arpa" {
+          	type master;
+          	file "master/1.16.172.in-addr.arpa";
+          };
+
+          include "/etc/named.rfc1912.zones";
+          include "/etc/named.root.key";
+        owner: root
+        group: named
+        mode: "0640"
+
+    # ── Zone files ──
+    - name: Create master zone directory
+      tags: [zones]
+      ansible.builtin.file:
+        path: /var/named/master
+        state: directory
+        owner: root
+        group: named
+        mode: "0750"
+
+    - name: Write forward DNS zone file
+      tags: [zones]
+      ansible.builtin.copy:
+        dest: "/var/named/master/{{ dns_zone }}"
+        content: |
+          $TTL 604800
+          {{ dns_zone }}.    IN      SOA     ns01.{{ dns_zone }}. root.{{ dns_zone }}. (
+                          2026052801 ; Serial
+                          600 ; Refresh
+                          3600 ; Retry
+                          1w ; Expire
+                          360 ; Minimum TTL
+                          )
+
+                  IN      NS      ns01.{{ dns_zone }}.
+
+          ns01            IN      A       {{ hq_srv_ip }}
+          hq-srv          IN      A       {{ hq_srv_ip }}
+          hq-rtr          IN      A       {{ hq_rtr_uplink }}
+          hq-cli          IN      A       192.168.200.2
+          br-srv          IN      A       {{ br_srv_ip }}
+          br-rtr          IN      A       {{ br_rtr_uplink }}
+          isp             IN      A       {{ isp_to_hq }}
+          web             IN      CNAME   isp.{{ dns_zone }}.
+          docker          IN      CNAME   isp.{{ dns_zone }}.
+        owner: root
+        group: named
+        mode: "0640"
+
+    - name: Write reverse DNS zone for HQ-SRV network (192.168.100.x)
+      tags: [zones]
+      ansible.builtin.copy:
+        dest: "/var/named/master/100.168.192.in-addr.arpa"
+        content: |
+          $TTL 604800
+          100.168.192.in-addr.arpa.  IN  SOA  ns01.{{ dns_zone }}. root.{{ dns_zone }}. (
+                          2026052801 ; Serial
+                          600 ; Refresh
+                          3600 ; Retry
+                          1w ; Expire
+                          360 ; Minimum TTL
+                          )
+
+                  IN      NS      ns01.{{ dns_zone }}.
+
+          2       IN      PTR     hq-srv.{{ dns_zone }}.
+          1       IN      PTR     hq-rtr.{{ dns_zone }}.
+        owner: root
+        group: named
+        mode: "0640"
+
+    - name: Write reverse DNS zone for HQ-CLI network (192.168.200.x)
+      tags: [zones]
+      ansible.builtin.copy:
+        dest: "/var/named/master/200.168.192.in-addr.arpa"
+        content: |
+          $TTL 604800
+          200.168.192.in-addr.arpa.  IN  SOA  ns01.{{ dns_zone }}. root.{{ dns_zone }}. (
+                          2026052801 ; Serial
+                          600 ; Refresh
+                          3600 ; Retry
+                          1w ; Expire
+                          360 ; Minimum TTL
+                          )
+
+                  IN      NS      ns01.{{ dns_zone }}.
+
+          2       IN      PTR     hq-cli.{{ dns_zone }}.
+          1       IN      PTR     hq-rtr.{{ dns_zone }}.
+        owner: root
+        group: named
+        mode: "0640"
+
+    - name: Write reverse DNS zone for BR-SRV network (192.168.30.x)
+      tags: [zones]
+      ansible.builtin.copy:
+        dest: "/var/named/master/30.168.192.in-addr.arpa"
+        content: |
+          $TTL 604800
+          30.168.192.in-addr.arpa.  IN  SOA  ns01.{{ dns_zone }}. root.{{ dns_zone }}. (
+                          2026052801 ; Serial
+                          600 ; Refresh
+                          3600 ; Retry
+                          1w ; Expire
+                          360 ; Minimum TTL
+                          )
+
+                  IN      NS      ns01.{{ dns_zone }}.
+
+          2       IN      PTR     br-srv.{{ dns_zone }}.
+          1       IN      PTR     br-rtr.{{ dns_zone }}.
+        owner: root
+        group: named
+        mode: "0640"
+    
+    - name: Write reverse DNS zone for BR-RTR
+      tags: [zones]
+      ansible.builtin.copy:
+        dest: "/var/named/master/2.16.172.in-addr.arpa"
+        content: |
+          $TTL 604800
+          2.16.172.in-addr.arpa.  IN  SOA  ns01.{{ dns_zone }}. root.{{ dns_zone }}. (
+                          2026052801 ; Serial
+                          600 ; Refresh
+                          3600 ; Retry
+                          1w ; Expire
+                          360 ; Minimum TTL
+                          )
+
+                  IN      NS      ns01.{{ dns_zone }}.
+
+          2       IN      PTR     br-rtr.{{ dns_zone }}.
+          1       IN      PTR     isp.{{ dns_zone }}.
+        owner: root
+        group: named
+        mode: "0640"
+    
+    - name: Write reverse DNS zone for BR-RTR
+      tags: [zones]
+      ansible.builtin.copy:
+        dest: "/var/named/master/1.16.172.in-addr.arpa"
+        content: |
+          $TTL 604800
+          1.16.172.in-addr.arpa.  IN  SOA  ns01.{{ dns_zone }}. root.{{ dns_zone }}. (
+                          2026052801 ; Serial
+                          600 ; Refresh
+                          3600 ; Retry
+                          1w ; Expire
+                          360 ; Minimum TTL
+                          )
+
+                  IN      NS      ns01.{{ dns_zone }}.
+
+          2       IN      PTR     hq-rtr.{{ dns_zone }}.
+          1       IN      PTR     isp.{{ dns_zone }}.
+        owner: root
+        group: named
+        mode: "0640"
+
+    # ── Start BIND ──
+    - name: Enable and start named
+      tags: [service]
+      ansible.builtin.systemd:
+        name: named
+        enabled: true
+        state: restarted
+
+    # ── Configure HQ-SRV to use its own BIND as DNS ──
+    - name: Configure systemd-resolved to use local BIND
+      tags: [resolver]
+      ansible.builtin.copy:
+        dest: /etc/systemd/resolved.conf.d/dns.conf
+        content: |
+          [Resolve]
+          DNS=127.0.0.1
+          FallbackDNS={{ dns_forwarders }}
+          Domains={{ domain }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Restart systemd-resolved
+      tags: [resolver]
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted

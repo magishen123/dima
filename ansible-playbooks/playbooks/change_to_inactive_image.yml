@@ -1,0 +1,12 @@
+- name: change_image
+  tags: change_image
+  hosts: all
+  connection: network_cli
+  collections: eltex.esr
+  vars:
+    ansible_network_os: eltex.esr.esr
+    ansible_command_timeout: 60
+  gather_facts: False
+  tasks:
+    - name: set_inactive_image
+      include_tasks: base_tasks/change_to_inactive_image_tasks.yml

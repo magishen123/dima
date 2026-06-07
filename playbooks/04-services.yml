@@ -1,0 +1,499 @@
+
+---
+# ════════════════════════════════════════
+#  HQ-SRV: RAID0, NFS server, Apache webapp
+# ════════════════════════════════════════
+- name: "05-services · HQ-SRV"
+  hosts: hq-srv
+  become: true
+  tasks:
+
+    # ══════════ Mount Additional.iso from CD/DVD ══════════
+    - name: Create mount point for CD/DVD
+      tags: [additional]
+      ansible.builtin.file:
+        path: /mnt/cdrom
+        state: directory
+        mode: '0755'
+
+    - name: Mount CD/DVD drive (Additional.iso)
+      tags: [additional]
+      ansible.builtin.mount:
+        path: /mnt/cdrom
+        src: /dev/sr0
+        fstype: iso9660
+        opts: ro
+        state: mounted
+
+    - name: Copy web files from CD/DVD to /home/user
+      tags: [additional]
+      ansible.builtin.copy:
+        src: /mnt/cdrom/web/
+        dest: /home/user/web/
+        remote_src: true
+        mode: preserve
+
+    # ── Packages ──
+    # - name: Install HQ-SRV service packages
+    #   tags: [packages]
+    #   ansible.builtin.dnf:
+    #     name:
+    #       - mdadm
+    #       - nfs4-acl-tools
+    #       - nfs-utils
+    #       - httpd
+    #       - php
+    #       - php-mysqlnd
+    #       - mariadb-server
+    #       - mariadb
+    #     state: present
+
+    # ══════════ Мод2-2: RAID 0 ══════════
+
+    - name: Check if RAID array already exists
+      tags: [raid]
+      ansible.builtin.stat:
+        path: /dev/md0
+      register: md0_stat
+
+    - name: Discover available disks for RAID
+      tags: [raid]
+      ansible.builtin.shell: |
+        set -e
+        DISK1=""
+        DISK2=""
+        for d in /dev/sdb /dev/sdc /dev/vdb /dev/vdc; do
+          if [ -b "$d" ]; then
+            if [ -z "$DISK1" ]; then
+              DISK1="$d"
+            elif [ -z "$DISK2" ]; then
+              DISK2="$d"
+            fi
+          fi
+        done
+        if [ -z "$DISK1" ] || [ -z "$DISK2" ]; then
+          echo "ERROR: Could not find two block devices for RAID" >&2
+          exit 1
+        fi
+        echo "$DISK1 $DISK2"
+      register: raid_disks
+      changed_when: false
+      when: not md0_stat.stat.exists
+
+    - name: Create RAID 0 array
+      tags: [raid]
+      ansible.builtin.shell: |
+        set -e
+        mdadm --create /dev/md0 --level=0 --raid-devices=2 {{ raid_disks.stdout }} --run
+      when: not md0_stat.stat.exists
+
+    - name: Save RAID config to mdadm.conf
+      tags: [raid]
+      ansible.builtin.shell: |
+        mdadm --detail --scan >> /etc/mdadm.conf
+      changed_when: true
+
+    - name: Check if RAID is already formatted
+      tags: [raid]
+      ansible.builtin.shell: blkid -o value -s TYPE /dev/md0
+      register: md0_fstype
+      changed_when: false
+      failed_when: false
+
+    - name: Format RAID array with ext4
+      tags: [raid]
+      ansible.builtin.command: mkfs.ext4 /dev/md0
+      when: md0_fstype.stdout != 'ext4'
+
+    - name: Create RAID mount point
+      tags: [raid]
+      ansible.builtin.file:
+        path: /raid
+        state: directory
+        mode: "0755"
+
+    - name: Mount RAID array
+      tags: [raid]
+      ansible.builtin.mount:
+        path: /raid
+        src: /dev/md0
+        fstype: ext4
+        state: mounted
+
+    - name: Add RAID to fstab
+      tags: [raid]
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: "/dev/md0  /raid  ext4  defaults  0  2"
+        regexp: '/dev/md0'
+        create: false
+
+    # ══════════ Мод2-3: NFS Server ══════════
+
+    - name: Create NFS export directory
+      tags: [nfs]
+      ansible.builtin.file:
+        path: "{{ nfs_export_path }}"
+        state: directory
+        mode: "0777"
+        recurse: true
+
+    - name: Write NFS exports (rw only for HQ-CLI network)
+      tags: [nfs]
+      ansible.builtin.copy:
+        dest: /etc/exports
+        content: |
+          {{ nfs_export_path }}       {{ nfs_allowed_net }}(rw,no_root_squash)
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Enable and start NFS server
+      tags: [nfs]
+      ansible.builtin.systemd:
+        name: nfs-server
+        enabled: true
+        state: restarted
+
+    - name: Re-export NFS shares
+      tags: [nfs]
+      ansible.builtin.command: exportfs -arv
+      changed_when: true
+
+    # ══════════ Мод2-6: Apache + PHP + MariaDB Web App ══════════
+
+    - name: Enable and start MariaDB
+      tags: [webapp]
+      ansible.builtin.systemd:
+        name: mariadb
+        enabled: true
+        state: started
+
+    - name: Secure MariaDB and set root password
+      tags: [webapp]
+      ansible.builtin.shell: |
+        mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ webapp_mariadb_root_pass }}';"
+        mysql -u root -p{{ webapp_mariadb_root_pass }} -e "DELETE FROM mysql.user WHERE User='';"
+        mysql -u root -p{{ webapp_mariadb_root_pass }} -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
+        mysql -u root -p{{ webapp_mariadb_root_pass }} -e "DROP DATABASE IF EXISTS test;"
+        mysql -u root -p{{ webapp_mariadb_root_pass }} -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+        mysql -u root -p{{ webapp_mariadb_root_pass }} -e "FLUSH PRIVILEGES;"
+      changed_when: true
+
+    - name: Create webdb database and web user
+      tags: [webapp]
+      ansible.builtin.shell: |
+        mysql -u root -p{{ webapp_mariadb_root_pass }} -e "
+          CREATE DATABASE IF NOT EXISTS {{ webapp_db_name }};
+          CREATE USER IF NOT EXISTS '{{ webapp_db_user }}'@'%' IDENTIFIED BY '{{ webapp_db_pass }}';
+          GRANT ALL PRIVILEGES ON {{ webapp_db_name }}.* TO '{{ webapp_db_user }}'@'%';
+          FLUSH PRIVILEGES;
+        "
+      changed_when: true
+
+    - name: Import database dump
+      tags: [webapp]
+      ansible.builtin.shell: |
+        mysql -u root -p{{ webapp_mariadb_root_pass }} {{ webapp_db_name }} < /home/user/web/dump.sql
+      changed_when: true
+
+    - name: Copy web files
+      tags: [webapp]
+      ansible.builtin.shell: |
+        cp /home/user/web/index.php /var/www/html/
+        cp /home/user/web/logo.png /var/www/html/
+      changed_when: true
+
+    - name: Update index.php with correct DB credentials
+      tags: [webapp]
+      ansible.builtin.shell: |
+        sed -i 's/\$servername\s*=.*/\$servername = "localhost";/' /var/www/html/index.php
+        sed -i 's/\$username\s*=.*/\$username = "{{ webapp_db_user }}";/' /var/www/html/index.php
+        sed -i 's/\$password\s*=.*/\$password = "{{ webapp_db_pass }}";/' /var/www/html/index.php
+        sed -i 's/\$dbname\s*=.*/\$dbname = "{{ webapp_db_name }}";/' /var/www/html/index.php
+      changed_when: true
+
+    - name: Set ownership on web files
+      tags: [webapp]
+      ansible.builtin.shell: chown -R apache:apache /var/www/html/
+      changed_when: true
+
+    - name: Enable and restart Apache
+      tags: [webapp]
+      ansible.builtin.systemd:
+        name: httpd
+        enabled: true
+        state: restarted
+
+    - name: Restart MariaDB
+      tags: [webapp]
+      ansible.builtin.systemd:
+        name: mariadb
+        state: restarted
+
+
+# ════════════════════════════════════════
+#  HQ-CLI: NFS client, Yandex Browser
+# ════════════════════════════════════════
+- name: "05-services · HQ-CLI"
+  hosts: hq-cli
+  become: true
+  tasks:
+
+    # ── Packages ──
+    # - name: Install HQ-CLI packages
+    #   tags: [packages]
+    #   ansible.builtin.dnf:
+    #     name:
+    #       - nfs-utils
+    #       - samba-client
+    #     state: present
+
+    # ══════════ Мод2-3: NFS Client ══════════
+
+    - name: Create NFS mount point
+      tags: [nfs]
+      ansible.builtin.file:
+        path: "{{ nfs_client_mount }}"
+        state: directory
+        mode: "0777"
+
+    - name: Add NFS mount to fstab (automount)
+      tags: [nfs]
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: "{{ hq_srv_ip }}:{{ nfs_export_path }}        {{ nfs_client_mount }}    nfs     auto    0 0"
+        regexp: "{{ nfs_client_mount }}"
+
+    - name: Mount NFS share
+      tags: [nfs]
+      ansible.builtin.mount:
+        path: "{{ nfs_client_mount }}"
+        src: "{{ hq_srv_ip }}:{{ nfs_export_path }}"
+        fstype: nfs
+        state: mounted
+
+    - name: Verify NFS mount
+      tags: [nfs]
+      ansible.builtin.command: df -h
+      register: nfs_mount_check
+      changed_when: false
+
+    - name: Show NFS mount status
+      tags: [nfs]
+      ansible.builtin.debug:
+        msg: "{{ nfs_mount_check.stdout_lines | select('search', 'nfs') | list }}"
+
+    # ══════════ Мод2-10: Yandex Browser ══════════
+
+    # - name: Install Yandex Browser
+    #   tags: [browser]
+    #   ansible.builtin.dnf:
+    #     name: yandex-browser-stable
+    #     state: present
+    
+# ════════════════════════════════════════
+#  BR-SRV: Docker testapp, Samba
+# ════════════════════════════════════════
+- name: "05-services · BR-SRV"
+  hosts: br-srv
+  become: true
+  tasks:
+
+    # ══════════ Mount Additional.iso from CD/DVD ══════════
+    - name: Create mount point for CD/DVD
+      tags: [additional]
+      ansible.builtin.file:
+        path: /mnt/cdrom
+        state: directory
+        mode: '0755'
+
+    - name: Mount CD/DVD drive (Additional.iso)
+      tags: [additional]
+      ansible.builtin.mount:
+        path: /mnt/cdrom
+        src: /dev/sr0
+        fstype: iso9660
+        opts: ro
+        state: mounted
+
+    # ══════════ Мод2-1: Samba ══════════
+
+    - name: Create hq group
+      tags: [samba]
+      ansible.builtin.group:
+        name: hq
+        state: present
+
+    - name: Create Samba system users (hquser1-hquser5)
+      tags: [samba]
+      ansible.builtin.user:
+        name: "hquser{{ item }}"
+        groups: hq
+        append: true
+        state: present
+      loop: [1, 2, 3, 4, 5]
+
+    - name: Set Samba passwords for hquser1-hquser5
+      tags: [samba]
+      ansible.builtin.shell: |
+        set -eo pipefail
+        echo -e "P@ssw0rd\nP@ssw0rd" | smbpasswd -a -s hquser{{ item }}
+      args:
+        executable: /bin/bash
+      loop: [1, 2, 3, 4, 5]
+      changed_when: true
+
+    - name: Enable and start Samba services
+      tags: [samba]
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - smb
+        - nmb
+
+    - name: Write Samba config
+      tags: [samba]
+      ansible.builtin.copy:
+        dest: /etc/samba/smb.conf
+        content: |
+          [global]
+            workgroup = SIRIUSEXAM
+            server string = BR-SRV Samba Server
+            netbios name = BR-SRV
+            security = user
+            map to guest = Bad User
+            dns proxy = no
+            realm = {{ samba_domain | upper }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Restart Samba services
+      tags: [samba]
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - smb
+        - nmb
+    
+# ════════════════════════════════════════
+#  ISP: Nginx reverse proxy + htpasswd auth
+# ════════════════════════════════════════
+- name: "05-services · ISP Nginx proxy"
+  hosts: isp
+  become: true
+  tags: [nginx]
+  tasks:
+
+    # ── Packages ──
+    # - name: Install nginx and httpd-tools
+    #   tags: [packages]
+    #   ansible.builtin.dnf:
+    #     name:
+    #       - nginx
+    #       - httpd-tools
+    #     state: present
+
+    # ── Мод2-8: Nginx reverse proxy ──
+    - name: Write web.conf for nginx (HQ-SRV web app with basic auth)
+      ansible.builtin.copy:
+        dest: /etc/nginx/conf.d/web.conf
+        content: |
+          server {
+              listen 80;
+              server_name web.{{ dns_zone }};
+
+              location / {
+                  proxy_pass http://{{ hq_rtr_uplink }}:{{ webapp_port }};
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  auth_basic "Restricted area";
+                  auth_basic_user_file /etc/nginx/.htpasswd;
+              }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Write docker.conf for nginx (BR-SRV testapp)
+      ansible.builtin.copy:
+        dest: /etc/nginx/conf.d/docker.conf
+        content: |
+          server {
+              listen 80;
+              server_name docker.{{ dns_zone }};
+
+              location / {
+                  proxy_pass http://{{ br_rtr_uplink }}:{{ testapp_port }};
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+
+    # ── Мод3: Nginx reverse proxy for Nextcloud on BR-SRV ──
+    - name: Generate self-signed SSL certificate for Nextcloud on ISP
+      ansible.builtin.shell: |
+        mkdir -p /etc/nginx/ssl
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /etc/nginx/ssl/nextcloud.key \
+          -out /etc/nginx/ssl/nextcloud.crt \
+          -subj "/C=RU/ST=Moscow/L=Moscow/O=Sirius/OU=IT/CN=nextcloud.{{ dns_zone }}"
+      args:
+        creates: /etc/nginx/ssl/nextcloud.crt
+
+    - name: Write nextcloud.conf for nginx (BR-SRV Nextcloud with SSL + HSTS)
+      ansible.builtin.copy:
+        dest: /etc/nginx/conf.d/nextcloud.conf
+        content: |
+          server {
+              listen 443 ssl http2;
+              server_name nextcloud.{{ dns_zone }};
+
+              ssl_certificate /etc/nginx/ssl/nextcloud.crt;
+              ssl_certificate_key /etc/nginx/ssl/nextcloud.key;
+
+              client_max_body_size 512M;
+
+              # HSTS header
+              add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+              location / {
+                  proxy_pass http://{{ br_rtr_uplink }}:{{ nextcloud_port }};
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_buffering off;
+                  proxy_request_buffering off;
+              }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+
+    # ── Мод2-9: htpasswd for web-based auth ──
+    - name: Create htpasswd file
+      ansible.builtin.shell: |
+        echo "{{ nginx_htpasswd_pass }}" | htpasswd -i -c /etc/nginx/.htpasswd {{ nginx_htpasswd_user }}
+      args:
+        creates: /etc/nginx/.htpasswd
+
+    # ── Start nginx ──
+    - name: Test nginx config
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Enable and restart nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: restarted

@@ -1,0 +1,204 @@
+---
+# ══════════════════════════════════════════════════════════════
+#  01-base.yml — Базовая настройка всех устройств
+#
+#  Задание 1:      Имена устройств (FQDN)
+#  Задание 9d:     Часовой пояс
+#  Задание 3c-g:   Локальные учётные записи (sshuser, net_admin)
+#  Задание Мод2-4: Chrony NTP (сервер на ISP, клиенты)
+#
+# ══════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════
+#  Linux hosts: hostname, timezone, SELinux, users, NTP
+# ════════════════════════════════════════
+- name: "01-base · Linux hosts"
+  hosts: linux
+  become: true
+  tasks:
+
+    # ── DNS resolver через systemd-resolved (чтобы dnf мог скачивать пакеты) ──
+    - name: Create resolved.conf.d directory
+      tags: [resolver, dns]
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: Write resolved.conf drop-in for persistent DNS
+      tags: [resolver, dns]
+      ansible.builtin.copy:
+        dest: /etc/systemd/resolved.conf.d/dns.conf
+        content: |
+          [Resolve]
+          DNS={{ hq_srv_ip }} {{ dns_forwarders }}
+          FallbackDNS=77.88.8.3
+          Domains={{ domain }}
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Restart systemd-resolved
+      tags: [resolver, dns]
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
+
+    # ── Задание 1: Hostname (FQDN) ──
+    - name: Set hostname (FQDN)
+      tags: [hostname]
+      ansible.builtin.hostname:
+        name: "{{ hostname }}"
+
+    # ── Задание 9d: Timezone ──
+    - name: Set timezone
+      tags: [timezone]
+      community.general.timezone:
+        name: "{{ timezone }}"
+
+    # ── SELinux → disabled ──
+    - name: Disable SELinux in config
+      tags: [selinux]
+      ansible.builtin.lineinfile:
+        path: /etc/selinux/config
+        regexp: '^SELINUX='
+        line: 'SELINUX=disabled'
+
+    - name: Check current SELinux mode
+      tags: [selinux]
+      ansible.builtin.command: getenforce
+      register: selinux_status
+      changed_when: false
+
+    - name: Set SELinux to permissive at runtime
+      tags: [selinux]
+      ansible.builtin.command: setenforce 0
+      changed_when: true
+      when: selinux_status.stdout != 'Disabled'
+
+    # ── Задание 3d-f: net_admin on ISP ──
+    - name: Create net_admin account on ISP
+      tags: [users]
+      ansible.builtin.user:
+        name: "{{ netadmin_name }}"
+        state: present
+        groups: wheel
+        append: true
+      when: inventory_hostname == 'isp'
+
+    - name: Set net_admin password on ISP
+      tags: [users]
+      ansible.builtin.shell: |
+        set -eo pipefail
+        echo "{{ netadmin_name }}:{{ netadmin_password }}" | chpasswd
+      args:
+        executable: /bin/bash
+      changed_when: true
+      no_log: true
+      when: inventory_hostname == 'isp'
+
+    - name: Allow net_admin passwordless sudo on ISP
+      tags: [users]
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/net_admin
+        content: "{{ netadmin_name }} ALL=(ALL) NOPASSWD: ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+      when: inventory_hostname == 'isp'
+
+    # ── Мод2-4: Chrony NTP — сервер на ISP ──
+    # - name: Install chrony
+    #   tags: [ntp]
+    #   ansible.builtin.dnf:
+    #     name: chrony
+    #     state: present
+
+    - name: Write chrony SERVER config (ISP — stratum 5)
+      tags: [ntp]
+      ansible.builtin.copy:
+        dest: /etc/chrony.conf
+        content: |
+          server ntp1.vniiftri.ru iburst prefer
+
+          local stratum 5
+          allow 0.0.0.0/0
+
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          logdir /var/log/chrony
+        owner: root
+        group: root
+        mode: "0644"
+      when: inventory_hostname == 'isp'
+
+    # ── Мод2-4: Chrony NTP — клиенты (HQ-SRV, HQ-CLI, BR-SRV) ──
+    - name: Write chrony CLIENT config
+      tags: [ntp]
+      ansible.builtin.copy:
+        dest: /etc/chrony.conf
+        content: |
+          server {{ ntp_server_ip }} iburst
+
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          logdir /var/log/chrony
+        owner: root
+        group: root
+        mode: "0644"
+      when: inventory_hostname != 'isp'
+
+    - name: Enable and restart chronyd
+      tags: [ntp]
+      ansible.builtin.systemd:
+        name: chronyd
+        enabled: true
+        state: restarted
+
+# ════════════════════════════════════════
+#  Eltex routers: hostname + net_admin user
+# ════════════════════════════════════════
+- name: "01-base · Eltex routers"
+  hosts: eltex
+  gather_facts: false
+  tasks:
+
+    # ── Задание 1: Hostname ──
+    - name: Set hostname on Eltex
+      tags: [hostname]
+      eltex.esr.esr_config:
+        lines:
+          - "hostname {{ hostname }}"
+        match: none
+        save_when: applied
+
+    # ── Задание 3d-g: net_admin with privilege 15 ──
+    - name: Create net_admin user on Eltex
+      tags: [users]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "username {{ netadmin_name }}"
+          - "password {{ netadmin_password }}"
+          - "privilege 15"
+          - "exit"
+
+    # ── General settings (syslog, DNS, security, SSH) ──
+    - name: General settings
+      tags: [general]
+      eltex.esr.esr_config:
+        match: none
+        save_when: applied
+        lines:
+          - "domain lookup enable"
+          - "domain nameserver {{ hq_srv_ip }}"
+          - "domain nameserver {{ dns_forwarders }}"
+          - "domain name {{ domain }}"
+          - "security passwords default-expired"
+          - "ip ssh server"
+          - "ntp enable"
+          - "ntp broadcast-client enable"
+    
